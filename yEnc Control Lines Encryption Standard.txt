@@ -1,0 +1,276 @@
+RFC-DRAFT: yEnc Control Lines Encryption Standard
+Version: 0.1
+Date: 2025-10-25
+Author: Independent Specification
+
+Status: Experimental
+Category: Informational
+
+Abstract:
+This document defines a reversible, format-preserving encryption
+scheme for yEnc control lines in yEnc-encoded binary blocks used in
+Usenet transfers. The scheme maintains exact length and preserves the
+printable yEnc character range required for Usenet transmission.
+
+----------------------------------------------------------------------
+1. Scope
+
+This specification describes the method to encrypt and decrypt
+yEnc header and footer lines (lines beginning with "=y") while
+maintaining:
+  - yEnc-compatible printable characters
+  - deterministic reconstruction of the original yEnc structure
+  - fixed ciphertext length equal to plaintext length per line
+  - format-preserving output suitable for Usenet transmission
+  - no additional yEnc encoding step required after encryption
+
+It is intended for use in single or multipart binary uploads or
+segment encryption, where yEnc control lines are encrypted while
+preserving the overall yEnc structure and leaving data lines
+unmodified.
+
+----------------------------------------------------------------------
+2. Definitions
+
+  yEnc Block:
+    A text segment beginning with "=ybegin" and ending with "=yend".
+
+  yEnc Control Line:
+    Any line within a yEnc block that begins with "=y" (such as
+    "=ybegin", "=ypart", "=yend", or custom lines such as
+    "=yencryption").
+
+  Data Line:
+    Any line within a yEnc block that does not begin with "=y"
+    (contains the actual encoded binary data).
+
+  Line Content:
+    The text content of a line excluding any trailing LF (0x0A) or
+    CRLF (0x0D 0x0A) line terminators.
+
+  Alphabet:
+    The 253-symbol byte domain: all byte values 0x01–0xFF except
+    0x0A (LF) and 0x0D (CR).
+
+  segmentIndex:
+    A 32-bit unsigned integer >= 1 providing a continuous, globally
+    unique index across all segments in the upload sequence,
+    regardless of file boundaries. For example, if file 1 has
+    segments 1, 2, and 3, then segment 1 of file 2 has segmentIndex
+    4. This ensures unique tweak values for every segment across the
+    entire upload session.
+
+  lineIndex:
+    A 32-bit unsigned integer >= 1 representing the line number of
+    all lines within a yEnc block. The lineIndex of the last line
+    equals the total number of lines in the yEnc block. Used to
+    generate unique tweaks for yEnc control lines during
+    encryption/decryption.
+
+----------------------------------------------------------------------
+3. Processing Procedure
+
+Input: Complete yEnc block with any line endings (LF or CRLF).
+
+yEnc Structure Pattern:
+- Header line(s): "=ybegin ...", "=ypart ..." (if multipart)
+- Data lines: encoded binary data (multiple lines)
+- Footer line: "=yend ..."
+
+Encryption Steps:
+
+1. Split the yEnc block into individual lines, preserving line
+   ending information for reconstruction.
+2. Initialize lineIndex = 1.
+3. Process lines sequentially:
+   a. For lines beginning with "=y":
+      - Extract line content (excluding terminators)
+      - Encrypt using lineIndex-specific tweak
+      - Increment lineIndex
+   b. For lines not beginning with "=y": leave unchanged (data
+      lines)
+4. Preserve all line terminators and data lines exactly as received.
+
+This approach encrypts yEnc control information (headers/footers)
+while preserving data line integrity and overall structure.
+
+----------------------------------------------------------------------
+4. Encryption Algorithm
+
+Algorithm: FF1 (NIST SP 800-38G compliant Format-Preserving
+Encryption)
+
+Parameters:
+  - Alphabet: 253 printable characters (see Section 2)
+  - Block cipher: AES-256
+  - Salt: SHA-256("yenc-control salt" || password)[0:16]
+  - Key derivation: Argon2id(password, salt)
+  - Tweak: HMAC-SHA256(master, "yenc-control tweak" ||
+    segmentIndex || lineIndex)[0:8]
+
+Procedure (applied to each yEnc control line individually):
+
+  a. Derive salt = SHA-256("yenc-control salt" || password)[0:16]
+  b. Derive masterKey = Argon2id(password, salt)
+  c. Derive encKey = HMAC-SHA256(masterKey, "yenc-control key")
+  d. Derive tweak = HMAC-SHA256(masterKey, "yenc-control tweak" ||
+     segmentIndex || lineIndex)[0:8] where lineIndex is the
+     sequential index of the current line within the segment.
+  e. Encrypt the line content using FF1 over the 253-character
+     alphabet.
+  f. Replace the original line content with the encrypted content.
+
+The encrypted control lines remain yEnc-compatible and require no
+additional encoding step before transmission.
+
+----------------------------------------------------------------------
+5. Decryption Algorithm
+
+Input: yEnc block with encrypted control lines.
+
+Steps:
+
+1. Split the yEnc block into individual lines, preserving line
+   endings.
+2. Initialize lineIndex = 1.
+3. Process lines from the beginning:
+   a. For each line starting from the first:
+      - Extract the line content (excluding line terminators)
+      - Derive salt, masterKey, encKey, and tweak using current
+        lineIndex
+      - Apply FF1 decryption over the 253-character alphabet
+      - If the decrypted content starts with "=y":
+        * Replace the encrypted line with decrypted content
+        * Increment lineIndex
+        * Continue to next line
+      - If the decrypted content does not start with "=y":
+        * This is the first data line; stop processing from
+          beginning
+        * Restore the original encrypted content for this line
+4. Process the last line (footer):
+   a. Extract the last line content (excluding line terminators)
+   b. Derive salt, masterKey, encKey, and tweak using current
+      lineIndex
+   c. Apply FF1 decryption over the 253-character alphabet
+   d. Replace the encrypted line with decrypted content (should
+      start with "=yend")
+5. Reconstruct the complete yEnc block with original line endings.
+
+----------------------------------------------------------------------
+6. Length Properties
+
+- Each encrypted yEnc control line has identical length to its
+  original.
+- Data lines remain completely unchanged in length and content.
+- Overall yEnc block length is preserved exactly.
+- No additional salt storage is required as salt is
+  deterministically derived from password.
+- Line endings and formatting are preserved throughout the process.
+
+----------------------------------------------------------------------
+7. Security Considerations
+
+- FF1 provides confidentiality equivalent to AES-256 under unique
+  key/tweak pairs.
+- The tweak ensures uniqueness per segmentIndex across all files.
+- Argon2id mitigates password brute-force; deterministic salt
+  derived from password maintains rainbow table resistance while
+  eliminating salt storage requirements.
+- The scheme offers confidentiality only, not integrity or
+  authenticity.
+- Deterministic output leaks identical plaintext segments if
+  key/tweak pairs repeat.
+
+----------------------------------------------------------------------
+8. NZB File Requirements
+
+When uploading encrypted yEnc blocks, Usenet upload tools MUST
+include the file numbering information used for the calculation of
+the continuous segmentIndex in the NZB file to preserve multipart
+file reconstruction capability:
+
+- The subject parameter of each <file> tag MUST begin with the file
+  number specifier in the format "[<file number>/<total files>]"
+- Example: subject="[1/3] filename.bin" for the first file of three
+- This ensures download clients can determine the file number for
+  the calculation of the continuous segmentIndex
+
+- The NZB file CAN include the encryption password as a meta tag:
+  <meta type="password">your_encryption_password</meta>
+- This allows download clients to automatically decrypt the yEnc
+  control lines
+
+Usenet download clients encountering encrypted yEnc headers MUST:
+- Extract the file number from the NZB subject line
+- Use this information for proper file sequencing and calculation of
+  the segmentIndex
+
+This requirement ensures multipart file downloads work correctly even
+when yEnc control lines are encrypted.
+
+----------------------------------------------------------------------
+9. Interoperability Notes
+
+- Any FF1 implementation conforming to NIST SP 800-38G may be used
+  if it supports custom alphabets.
+- Implementations must ensure 1:1 reversible mapping between byte
+  values and alphabet symbols.
+
+----------------------------------------------------------------------
+10. Example
+
+Input plaintext:
+
+  =ybegin line=9 size=18 name=file.bin\r\n
+  abcDEF123\r\n
+  ghiJKL456\r\n
+  =yend size=18\r\n
+
+Encryption Processing:
+- Line 1: "=ybegin line=9 size=18 name=file.bin" → encrypted
+  (lineIndex=1)
+- Line 2: "abcDEF123" → unchanged (data line)
+- Line 3: "ghiJKL456" → unchanged (data line)
+- Line 4: "=yend size=18" → encrypted (lineIndex=4)
+
+Encrypted output:
+
+  K7mX9pL2qR8vN4wZ6tY1uI5eA3cS0fH7j\r\n
+  abcDEF123\r\n
+  ghiJKL456\r\n
+  T8nB2hM6xV9qL4pW1rE7uI0oA5cF3gH\r\n
+
+Decryption Processing:
+- Try decrypt line 1 with lineIndex=1: results in "=ybegin..." →
+  valid, keep
+- Try decrypt line 2 with lineIndex=2: results in "jX8mR2..." →
+  doesn't start with "=y", skip
+- Skip all middle data lines
+- Decrypt last line with lineIndex=4: results in "=yend size=18" →
+  valid footer
+
+After decryption, the reconstructed text matches the original yEnc
+block exactly, with control lines restored and data lines unchanged.
+
+----------------------------------------------------------------------
+11. Summary
+
+This Standard describes a deterministic format-preserving encryption
+(FF1) applied selectively to yEnc control lines, producing
+encrypted messages that:
+  - Keep all data lines completely unchanged.
+  - Encrypt only yEnc header/footer information (lines starting
+    with "=y").
+  - Preserve exact message structure and line endings.
+  - Remain printable and safe for Usenet transport.
+  - Require no additional yEnc encoding after encryption.
+
+This approach provides targeted encryption of yEnc control information
+while maintaining full compatibility with existing yEnc processing
+tools.
+
+This draft defines the canonical processing rules for interoperability
+between implementations.
+
+----------------------------------------------------------------------
+End of Document

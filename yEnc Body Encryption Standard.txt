@@ -1,0 +1,262 @@
+RFC-DRAFT: yEnc Body Encryption Standard
+Version: 0.1
+Date: 2025-10-25
+Author: Independent Specification
+
+Status: Experimental
+Category: Informational
+
+Abstract:
+This document defines a reversible encryption scheme for binary data
+in yEnc-encoded blocks used in Usenet transfers. The scheme encrypts
+the raw binary data before yEnc encoding using XChaCha20-Poly1305
+authenticated encryption, ensuring both confidentiality and integrity
+of the transmitted data.
+
+----------------------------------------------------------------------
+1. Scope
+
+This specification describes the method to encrypt binary data before
+yEnc encoding while maintaining:
+  - Standard yEnc structure and compatibility
+  - Authenticated encryption with integrity protection
+  - Deterministic key/nonce derivation from password
+  - Clear indication of encryption through yEnc control lines
+  - Full compatibility with existing yEnc parsers
+
+It is intended for use in binary file uploads where the actual file
+content needs to be encrypted while maintaining yEnc transport
+compatibility and providing cryptographic authentication.
+
+----------------------------------------------------------------------
+2. Definitions
+
+  yEnc Block:
+    A text segment beginning with "=ybegin" and ending with "=yend".
+
+  yEnc Control Line:
+    Any line within a yEnc block that begins with "=y" (such as
+    "=ybegin", "=ypart", "=yend", or "=yencryption").
+
+  Data Line:
+    Any line within a yEnc block that does not begin with "=y"
+    (contains the actual encoded binary data).
+
+  Binary Payload:
+    The original binary file data before any encryption or yEnc
+    encoding.
+
+  Encrypted Payload:
+    The binary data after XChaCha20-Poly1305 encryption, including
+    the authentication tag.
+
+  segmentIndex:
+    A 32-bit unsigned integer >= 1 providing a continuous, globally
+    unique index across all segments in the upload sequence,
+    regardless of file boundaries. For example, if file 1 has
+    segments 1, 2, and 3, then segment 1 of file 2 has segmentIndex
+    4. This ensures unique nonce values for every segment across the
+    entire upload session.
+
+----------------------------------------------------------------------
+3. Processing Procedure
+
+Input: Binary file data and password for encryption.
+
+Encryption Steps:
+
+1. Read the binary file data (binary payload).
+2. Derive encryption key and nonce using segmentIndex (see Section 4).
+3. Encrypt the binary payload using XChaCha20-Poly1305.
+4. Extract the authentication tag from the encrypted output.
+5. Apply standard yEnc encoding to the ciphertext only (without tag).
+6. Insert "=yencryption" control line after the "=ybegin" line
+   containing cipher type and authentication tag.
+6. Construct complete yEnc block with encrypted data.
+
+Decryption Steps:
+
+1. Parse yEnc block to extract encryption parameters from
+   "=yencryption" line.
+2. Apply standard yEnc decoding to retrieve encrypted payload.
+3. Extract authentication tag from encrypted payload.
+4. Derive decryption key and nonce using segmentIndex.
+5. Decrypt and authenticate using XChaCha20-Poly1305.
+6. Verify authentication tag and output original binary data.
+
+----------------------------------------------------------------------
+4. Encryption Algorithm
+
+Algorithm: XChaCha20-Poly1305 (RFC 8439 Extended)
+
+Parameters:
+  - Cipher: XChaCha20 (256-bit key, 192-bit nonce)
+  - Authentication: Poly1305 (128-bit tag)
+  - Salt: SHA-256("yenc-body salt" || password)[0:16]
+  - Key derivation: Argon2id(password, salt, 256-bit output)
+  - Nonce: HMAC-SHA256(key, "yenc-body nonce" || segmentIndex)[0:24]
+
+Procedure:
+
+  a. Derive salt = SHA-256("yenc-body salt" || password)[0:16]
+  b. Derive key = Argon2id(password, salt, 256-bit output)
+  c. Derive nonce = HMAC-SHA256(key, "yenc-body nonce" ||
+     segmentIndex)[0:24]
+  d. Encrypt binary payload using XChaCha20-Poly1305 with derived
+     key and nonce, producing ciphertext and 128-bit authentication
+     tag.
+  e. Apply yEnc encoding to the ciphertext only (excluding the tag).
+  f. Insert "=yencryption cipher=XChaCha20-Poly1305 tag=<hex_tag>"
+     control line after "=ybegin" line, where <hex_tag> is the
+     128-bit authentication tag.
+
+The yEncryption control line format:
+  =yencryption cipher=XChaCha20-Poly1305 tag=<32_hex_chars>
+
+Where <32_hex_chars> is the 128-bit authentication tag in lowercase
+hexadecimal format.
+
+----------------------------------------------------------------------
+5. Decryption Algorithm
+
+Input: yEnc block with encrypted binary data.
+
+Steps:
+
+1. Parse yEnc block to locate "=yencryption" control line.
+2. Extract cipher type and authentication tag from the control line.
+3. Verify cipher is "XChaCha20-Poly1305".
+4. Apply yEnc decoding to data lines to retrieve encrypted payload.
+5. Derive salt, key, and nonce using the same procedure as
+   encryption.
+6. Decrypt using XChaCha20-Poly1305 with derived parameters.
+7. Verify authentication tag matches the tag from the control line.
+8. Output decrypted binary data on successful authentication.
+
+Authentication failure MUST result in complete decryption failure
+with no partial data output.
+
+----------------------------------------------------------------------
+6. Length Properties
+
+- Encrypted binary data has the same size as original (authentication
+  tag is stored in control line, not in data).
+- yEnc encoding adds standard yEnc overhead (~2% typical expansion).
+- One additional "=yencryption" control line is added to the yEnc
+  block.
+- Overall expansion is approximately 2% plus one control line with
+  32-character hex tag.
+- File size in yEnc headers reflects the ciphertext size (same as
+  original).
+
+----------------------------------------------------------------------
+7. Security Considerations
+
+- XChaCha20-Poly1305 provides both confidentiality and authenticity.
+- Unique nonces per segmentIndex prevent nonce reuse across segments.
+- Argon2id mitigates password brute-force attacks.
+- Deterministic nonce derivation eliminates nonce storage
+  requirements.
+- Authentication tag prevents tampering and provides integrity
+  verification.
+- Failed authentication MUST abort decryption completely.
+- The scheme provides both confidentiality and integrity, unlike
+  format-preserving approaches.
+
+----------------------------------------------------------------------
+8. NZB File Requirements
+
+When uploading encrypted yEnc blocks, Usenet upload tools MUST
+include the file numbering information used for the calculation of
+the continuous segmentIndex in the NZB file to preserve multipart
+file reconstruction capability:
+
+- The subject parameter of each <file> tag MUST begin with the file
+  number specifier in the format "[<file number>/<total files>]"
+- Example: subject="[1/3] filename.bin" for the first file of three
+- This ensures download clients can determine the file number for
+  the calculation of the continuous segmentIndex
+
+- The NZB file CAN include the encryption password as a meta tag:
+  <meta type="password">your_encryption_password</meta>
+- This allows download clients to automatically decrypt the binary
+  data
+
+Usenet download clients encountering "=yencryption" control lines
+MUST:
+- Extract the file number from the NZB subject line
+- Use this information for proper file sequencing and calculation of
+  the segmentIndex
+- Use the password from the NZB meta tag (if available) for
+  automatic decryption
+
+This requirement ensures multipart file downloads and decryption work
+correctly even when binary data is encrypted.
+
+----------------------------------------------------------------------
+9. Interoperability Notes
+
+- Standard yEnc parsers will process encrypted blocks normally,
+  ignoring the "=yencryption" control line.
+- Decryption-aware tools must recognize and parse the "=yencryption"
+  line to enable decryption.
+- The encrypted data appears as normal yEnc-encoded binary data to
+  non-aware parsers.
+- File reconstruction works with standard yEnc tools, producing
+  encrypted files that require separate decryption.
+
+----------------------------------------------------------------------
+10. Example
+
+Input binary data: [18 bytes: 0x48656C6C6F20576F726C642E747874FF]
+Password: "test123"
+segmentIndex: 1
+
+Derived parameters:
+- salt: SHA-256("yenc-body salt" || "test123")[0:16]
+- key: Argon2id("test123", salt, 256-bit)  
+- nonce: HMAC-SHA256(key, "yenc-body nonce" || 1)[0:24]
+
+Encryption:
+- XChaCha20-Poly1305 encryption produces 18-byte ciphertext and
+  128-bit authentication tag
+- Authentication tag: a1b2c3d4e5f6789a0b1c2d3e4f567890
+
+yEnc encoded output:
+
+  =ybegin line=128 size=18 name=file.bin
+  =yencryption cipher=XChaCha20-Poly1305 tag=a1b2c3d4e5f6789a0b1c2d3e4f567890
+  <yEnc-encoded ciphertext data lines>
+  =yend size=18
+
+Decryption Processing:
+1. Parse "=yencryption" line to extract authentication tag
+2. yEnc decode data lines to get 18-byte ciphertext
+3. Derive same key/nonce using segmentIndex=1
+4. Decrypt ciphertext using XChaCha20-Poly1305 with tag from
+   control line
+5. Verify authentication during decryption process
+6. Output original 18-byte binary data on success
+
+----------------------------------------------------------------------
+11. Summary
+
+This Standard describes authenticated encryption using XChaCha20-
+Poly1305 applied to binary data before yEnc encoding, producing
+encrypted messages that:
+  - Encrypt the actual file content with strong authentication
+  - Maintain full yEnc structure compatibility  
+  - Provide both confidentiality and integrity protection
+  - Use deterministic key/nonce derivation from passwords
+  - Include clear encryption indicators in yEnc control lines
+  - Remain compatible with standard yEnc processing tools
+
+This approach provides comprehensive protection of binary file content
+while maintaining transport compatibility and providing cryptographic
+guarantees against both eavesdropping and tampering.
+
+This draft defines the canonical processing rules for interoperability
+between implementations.
+
+----------------------------------------------------------------------
+End of Document
