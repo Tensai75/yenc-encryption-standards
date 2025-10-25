@@ -79,10 +79,9 @@ Decryption Steps:
 1. Parse yEnc block to extract encryption parameters from
    "=yencryption" line.
 2. Apply standard yEnc decoding to retrieve encrypted payload.
-3. Extract authentication tag from encrypted payload.
-4. Derive decryption key and nonce using segmentIndex.
-5. Decrypt and authenticate using XChaCha20-Poly1305.
-6. Verify authentication tag and output original binary data.
+3. Derive decryption key and nonce using segmentIndex.
+4. Decrypt and authenticate using XChaCha20-Poly1305.
+5. Verify authentication tag and output original binary data.
 
 ----------------------------------------------------------------------
 4. Encryption Algorithm
