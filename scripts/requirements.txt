@@ -1,0 +1,4 @@
+argon2-cffi==25.1.0
+pynacl==1.6.2
+cryptography==46.0.5
+pytest==9.1.1
