@@ -1,6 +1,6 @@
 RFC-DRAFT: yEnc Control Lines Encryption Standard
-Version: 0.1
-Date: 2025-10-25
+Version: 0.2
+Date: 2025-10-26
 Author: Independent Specification
 
 Status: Experimental
@@ -11,6 +11,17 @@ This document defines a reversible, format-preserving encryption
 scheme for yEnc control lines in yEnc-encoded binary blocks used in
 Usenet transfers. The scheme maintains exact length and preserves the
 printable yEnc character range required for Usenet transmission.
+
+----------------------------------------------------------------------
+Change Log:
+
+Version 0.2 (2025-10-26):
+- Added specific Argon2id parameters: time=1, memory=64MB, threads=4
+- Standardized parameter order in Argon2id function calls
+- Updated all references to Argon2id throughout the document
+
+Version 0.1 (2025-10-25):
+- Initial draft specification
 
 ----------------------------------------------------------------------
 1. Scope
@@ -104,14 +115,14 @@ Parameters:
   - Alphabet: 253 printable characters (see Section 2)
   - Block cipher: AES-256
   - Salt: SHA-256("yenc-control salt" || password)[0:16]
-  - Key derivation: Argon2id(password, salt)
+  - Key derivation: Argon2id(password, salt, time=1, memory=64MB, threads=4, 256-bit output)
   - Tweak: HMAC-SHA256(master, "yenc-control tweak" ||
     segmentIndex || lineIndex)[0:8]
 
 Procedure (applied to each yEnc control line individually):
 
   a. Derive salt = SHA-256("yenc-control salt" || password)[0:16]
-  b. Derive masterKey = Argon2id(password, salt)
+  b. Derive masterKey = Argon2id(password, salt, time=1, memory=64MB, threads=4, 256-bit output)
   c. Derive encKey = HMAC-SHA256(masterKey, "yenc-control key")
   d. Derive tweak = HMAC-SHA256(masterKey, "yenc-control tweak" ||
      segmentIndex || lineIndex)[0:8] where lineIndex is the

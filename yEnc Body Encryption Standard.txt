@@ -1,6 +1,6 @@
 RFC-DRAFT: yEnc Body Encryption Standard
-Version: 0.1
-Date: 2025-10-25
+Version: 0.2
+Date: 2025-10-26
 Author: Independent Specification
 
 Status: Experimental
@@ -12,6 +12,17 @@ in yEnc-encoded blocks used in Usenet transfers. The scheme encrypts
 the raw binary data before yEnc encoding using XChaCha20-Poly1305
 authenticated encryption, ensuring both confidentiality and integrity
 of the transmitted data.
+
+----------------------------------------------------------------------
+Change Log:
+
+Version 0.2 (2025-10-26):
+- Added specific Argon2id parameters: time=1, memory=64MB, threads=4
+- Standardized parameter order in Argon2id function calls
+- Updated all references to Argon2id throughout the document
+
+Version 0.1 (2025-10-25):
+- Initial draft specification
 
 ----------------------------------------------------------------------
 1. Scope
@@ -92,13 +103,13 @@ Parameters:
   - Cipher: XChaCha20 (256-bit key, 192-bit nonce)
   - Authentication: Poly1305 (128-bit tag)
   - Salt: SHA-256("yenc-body salt" || password)[0:16]
-  - Key derivation: Argon2id(password, salt, 256-bit output)
+  - Key derivation: Argon2id(password, salt, time=1, memory=64MB, threads=4, 256-bit output)
   - Nonce: HMAC-SHA256(key, "yenc-body nonce" || segmentIndex)[0:24]
 
 Procedure:
 
   a. Derive salt = SHA-256("yenc-body salt" || password)[0:16]
-  b. Derive key = Argon2id(password, salt, 256-bit output)
+  b. Derive key = Argon2id(password, salt, time=1, memory=64MB, threads=4, 256-bit output)
   c. Derive nonce = HMAC-SHA256(key, "yenc-body nonce" ||
      segmentIndex)[0:24]
   d. Encrypt binary payload using XChaCha20-Poly1305 with derived
@@ -213,7 +224,7 @@ segmentIndex: 1
 
 Derived parameters:
 - salt: SHA-256("yenc-body salt" || "test123")[0:16]
-- key: Argon2id("test123", salt, 256-bit)  
+- key: Argon2id("test123", salt, time=1, memory=64MB, threads=4, 256-bit)  
 - nonce: HMAC-SHA256(key, "yenc-body nonce" || 1)[0:24]
 
 Encryption:
