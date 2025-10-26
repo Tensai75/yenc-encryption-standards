@@ -1,5 +1,5 @@
 RFC-DRAFT: yEnc Control Lines Encryption Standard
-Version: 0.2
+Version: 0.3
 Date: 2025-10-26
 Author: Independent Specification
 
@@ -14,6 +14,11 @@ printable yEnc character range required for Usenet transmission.
 
 ----------------------------------------------------------------------
 Change Log:
+
+Version 0.3 (2025-10-26):
+- Changed salt generation from deterministic SHA-256 to random values
+  from alphabet
+- Added salt embedding in first encrypted control line
 
 Version 0.2 (2025-10-26):
 - Added specific Argon2id parameters: time=1, memory=64MB, threads=4
@@ -114,22 +119,29 @@ Encryption)
 Parameters:
   - Alphabet: 253 printable characters (see Section 2)
   - Block cipher: AES-256
-  - Salt: SHA-256("yenc-control salt" || password)[0:16]
-  - Key derivation: Argon2id(password, salt, time=1, memory=64MB, threads=4, 256-bit output)
+  - Salt: Random 16 byte value from alphabet  (use cryptographically
+    secure RNG)
+  - Key derivation: Argon2id(password, salt, time=1, memory=64MB,
+    threads=4, 256-bit output)
   - Tweak: HMAC-SHA256(master, "yenc-control tweak" ||
     segmentIndex || lineIndex)[0:8]
 
 Procedure (applied to each yEnc control line individually):
 
-  a. Derive salt = SHA-256("yenc-control salt" || password)[0:16]
-  b. Derive masterKey = Argon2id(password, salt, time=1, memory=64MB, threads=4, 256-bit output)
+  a. Generate salt = Random 16 byte value from alphabet (once pe
+     upload session, use cryptographically secure RNG)
+  b. Derive masterKey = Argon2id(password, salt, time=1, memory=64MB,
+     threads=4, 256-bit output)
   c. Derive encKey = HMAC-SHA256(masterKey, "yenc-control key")
   d. Derive tweak = HMAC-SHA256(masterKey, "yenc-control tweak" ||
      segmentIndex || lineIndex)[0:8] where lineIndex is the
      sequential index of the current line within the segment.
   e. Encrypt the line content using FF1 over the 253-character
      alphabet.
-  f. Replace the original line content with the encrypted content.
+  f. For the first line (lineIndex=1): prepend the 16-byte salt to
+     the encrypted content.
+  g. Replace the original line content with the encrypted content
+     (including salt for first line).
 
 The encrypted control lines remain yEnc-compatible and require no
 additional encoding step before transmission.
@@ -144,28 +156,37 @@ Steps:
 1. Split the yEnc block into individual lines, preserving line
    endings.
 2. Initialize lineIndex = 1.
-3. Process lines from the beginning:
-   a. For each line starting from the first:
+3. Process the first line to extract salt:
+   a. Extract the first line content (excluding line terminators)
+   b. Extract salt from the first 16 bytes of the encrypted content
+   c. Remove salt from the encrypted content (remaining content for
+      decryption)
+   d. Derive masterKey, encKey, and tweak using extracted salt and
+      lineIndex=1
+   e. Apply FF1 decryption over the 253-character alphabet
+   f. Verify the decrypted content starts with "=y"
+   g. Replace the encrypted line with decrypted content
+4. Process remaining lines from the beginning:
+   a. For each subsequent line:
       - Extract the line content (excluding line terminators)
-      - Derive salt, masterKey, encKey, and tweak using current
-        lineIndex
+      - Derive masterKey, encKey, and tweak using extracted salt
+        and current lineIndex
       - Apply FF1 decryption over the 253-character alphabet
       - If the decrypted content starts with "=y":
         * Replace the encrypted line with decrypted content
         * Increment lineIndex
         * Continue to next line
       - If the decrypted content does not start with "=y":
-        * This is the first data line; stop processing from
-          beginning
+        * This is the first data line; stop processing
         * Restore the original encrypted content for this line
-4. Process the last line (footer):
+5. Process the last line (footer):
    a. Extract the last line content (excluding line terminators)
-   b. Derive salt, masterKey, encKey, and tweak using current
-      lineIndex
+   b. Derive masterKey, encKey, and tweak using extracted salt and
+      current lineIndex
    c. Apply FF1 decryption over the 253-character alphabet
    d. Replace the encrypted line with decrypted content (should
       start with "=yend")
-5. Reconstruct the complete yEnc block with original line endings.
+6. Reconstruct the complete yEnc block with original line endings.
 
 ----------------------------------------------------------------------
 6. Length Properties
@@ -184,9 +205,10 @@ Steps:
 - FF1 provides confidentiality equivalent to AES-256 under unique
   key/tweak pairs.
 - The tweak ensures uniqueness per segmentIndex across all files.
-- Argon2id mitigates password brute-force; deterministic salt
-  derived from password maintains rainbow table resistance while
-  eliminating salt storage requirements.
+- Argon2id with random salts provides strong protection against both
+  brute-force and rainbow table attacks.
+- Random salt per upload session ensures unique keys even for
+  identical passwords across different uploads.
 - The scheme offers confidentiality only, not integrity or
   authenticity.
 - Deterministic output leaks identical plaintext segments if
