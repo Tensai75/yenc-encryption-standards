@@ -1,235 +1,202 @@
 # yEnc Encryption Standards
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Experimental](https://img.shields.io/badge/Status-Experimental-red.svg)]()
+[![Status: Experimental Wire Contract (v1.2)](https://img.shields.io/badge/Status-v1.2%20Experimental-blue.svg)]()
 
-This repository contains specifications for **two complementary encryption standards** designed specifically for yEnc-encoded binary blocks used in Usenet transfers. Both standards can be used individually or combined depending on security and obfuscation requirements.
+This repository contains specifications for two encryption standards for yEnc-encoded binary blocks used in Usenet transfers. Version 1.2 defines the two standards for use together; an upload is either encrypted with both or not encrypted at all.
 
 ## Standards Overview
 
 ### 1. yEnc Control Lines Encryption Standard
 
-**Purpose**: Obfuscation and metadata protection  
-**Target**: yEnc header and footer lines (lines beginning with "=y")  
-**Method**: FF1 Format-Preserving Encryption
+This standard obfuscates and protects metadata. It targets the yEnc header and footer lines (lines beginning with "=y") and uses FF1 Format-Preserving Encryption.
 
-- **Format-preserving**: Encrypted control lines maintain exact length and character compatibility
-- **Selective encryption**: Only metadata is encrypted, binary data remains untouched
-- **Total obfuscation**: Hides file names, sizes, part information, and yEnc structure
-- **Optional**: Can be omitted when obfuscation is not required
+Encrypted control lines keep the exact length (lines 2..N) and character compatibility. The first control line (lineIndex=1) expands by 20 bytes because of the prepended article bootstrap (16-byte raw salt from the 253-byte Alphabet and 4-byte big-endian uint32 segmentIndex); the expansion is measured on line content, excluding any trailing line terminator, and bootstrap extraction happens after NNTP dot-unstuffing. Only metadata is encrypted; binary data lines remain completely untouched. File names, sizes, part information, and yEnc structure are hidden. Line counting uses 1-based physical line numbers after NNTP dot-unstuffing. Line terminators are preserved on restoration: the restoration layer preserves byte-for-byte the terminators it receives (bare LF is never canonicalized to CRLF by restoration itself), and a transport layer MAY have normalized bare LF to CRLF earlier (Body Standard Section 9); line contents, physical line count, bootstrap bytes, CRC, AAD, and authenticated plaintext remain unchanged either way. Restoration APIs that receive raw terminators preserve them exactly. Decoding is deterministic and position-based: header positions are inferred from the restored structure and data lines are never decrypted.
 
 ### 2. yEnc Body Encryption Standard
 
-**Purpose**: Content protection with authentication  
-**Target**: Binary file data before yEnc encoding  
-**Method**: XChaCha20-Poly1305 Authenticated Encryption
+This standard protects content with authentication. It targets binary file data before yEnc encoding and uses XChaCha20-Poly1305 Authenticated Encryption.
 
-- **Content security**: Encrypts actual file data with strong authentication
-- **Integrity protection**: Detects tampering through cryptographic authentication
-- **Transparent**: Standard yEnc parsers process encrypted blocks normally
-- **Optional**: Can be omitted if cryptographic protection of file content is not required
+It encrypts the actual file data and detects tampering through cryptographic authentication; failed authentication results in complete decryption failure with zero partial data output. Each encryption binds exact associated data (AAD): the segment's part number, part begin offset, segment byte count, and the `=ybegin` name value, serialized as `"yenc-body aad" || uint32_be(partNumber) || uint32_be(partBegin) || uint64_be(segmentBytes) || uint32_be(nameLength) || name` (Body Standard Section 2.1). This authenticates the raw restored name, part, range, and segment length: modifying any of those fields, or the ciphertext, fails authentication. The AEAD authenticates each article against its own restored control lines only; an intact article carries its own valid AAD and has no cryptographic freshness binding to a Message-ID, an NZB slot, or any external record, so replaying an intact article is not detected by cryptography. Receiver queue and coverage checks (missing-article bookkeeping, declared-range assembly, repair tooling) remain responsible for segment coverage and ordering; swapping two intact segments does not fail authentication. NNTP headers, subjects, Message-IDs, and XML order remain outside the AEAD and are explicitly unauthenticated. The canonical format is a strict five-token control line `=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> index=<8_hex_chars> tag=<32_hex_chars>` in lowercase hex (128 characters). Placement is physical line 2 for single-part articles (immediately after `=ybegin`) and physical line 3 for multipart articles (immediately after `=ypart`). An article is multipart if and only if physical line 2 after `=ybegin` is `=ypart`; otherwise it is single-part. The wire CRC covers ciphertext and is verified before AEAD decryption; after authentication succeeds, decoders MUST either clear the CRC metadata (crc32 = None) or recompute it over authenticated plaintext so downstream consumers verify plaintext CRC.
 
 ## Usage Scenarios
 
-### Scenario 1: Content Protection Only
+Version 1.2 defines combined mode only (control line encryption and body encryption together); other framing modes are reserved for future standards. For protection of both content and metadata, apply both standards together. With both standards in use, the 16-byte raw salt and 4-byte big-endian segmentIndex from Line 1 MUST equal the 16-byte salt and 8-hex index carried in `=yencryption` byte-for-byte and value-for-value; because one salt is shared, the combined-mode salt MUST lie in the intersection of both domains (the 253-byte Alphabet, with bytes 0x00, 0x0A, and 0x0D excluded). v1.2 producers emit combined mode only; receivers MUST support combined mode and reject other modes under PROVIDER_FAILOVER. An upload that needs neither protection is ordinary yEnc and uses neither standard.
 
-- **Use**: Body Encryption Standard only
-- **When**: Need strong file protection but metadata can remain visible
-- **Benefits**: Strong authenticated encryption, standard yEnc compatibility
+## Body Encryption vs. Preprocessing
 
-### Scenario 2: Obfuscation
+Body encryption is an alternative to preprocessing encryption such as password-protected archives, not an addition to it. Encrypting each segment while the article is built has these practical advantages:
 
-- **Use**: Control Lines Encryption Standard only
-- **When**: Need to hide upload metadata but file content protection handled separately or not required
-- **Benefits**: Complete metadata obfuscation, format-preserving compatibility
+- **No intermediate files**: no encrypted copy of the release is written to disk first, so no extra storage is needed and nothing has to be cleaned up afterwards.
+- **Streaming**: encryption happens in the same pass as yEnc encoding, with memory bounded to one article regardless of file size.
+- **Authenticated**: Poly1305 detects any modification, so tampered or corrupted articles are rejected instead of producing damaged output.
+- **One password**: both standards use the same password, with domain-separated key derivation, so the NZB carries a single password.
 
-### Scenario 3: Maximum Security
+## Password Management and Canonical NZB Metadata
 
-- **Use**: Both standards combined
-- **When**: Need complete protection of both content and metadata
-- **Benefits**: Authenticated file encryption + total metadata obfuscation
+### Transport Provenance vs Archive Passwords
 
-### Scenario 4: Standard Upload
+To distinguish encrypted yEnc transport from unencrypted uploads carrying archive passwords (such as password-protected RAR or 7z files), compliant NZB documents carry explicit metadata flags:
 
-- **Use**: Neither standard
-- **When**: No special security requirements
-- **Benefits**: Standard yEnc processing, maximum compatibility
+1. Encrypted Transport: When yEnc encryption is present, the NZB `<head>` MUST contain `<meta type="yenc_encrypted">true</meta>`. `<meta type="password">` is the interoperable way to deliver the transport password. Clients MAY also take the password from their own sources (user input, API, configuration) and let it override the NZB value; how a client obtains, stores, or displays the password is up to the client.
+2. Archive Password Decoupling: If an NZB contains `<meta type="password">` without `<meta type="yenc_encrypted">true</meta>`, the password applies solely to downstream extraction tools. The download client MUST process segments as standard unencrypted yEnc blocks without attempting transport decryption.
 
-## Password Management
-
-**NZB File Storage**: When encryption is used, the password CAN be stored in the NZB file using the standard password meta tag:
+### NZB 1.1 Example (Encrypted Release)
 
 ```xml
-<meta type="password">your_encryption_password</meta>
+<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">correct horse battery staple</meta>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="poster@example.com"
+       date="1727280000"
+       subject="4Qd7sJm2pL yEnc (1/2)">
+    <groups>
+      <group>alt.binaries.example</group>
+    </groups>
+    <segments>
+      <segment bytes="750000" number="1">article-1@example.com</segment>
+      <segment bytes="750000" number="2">article-2@example.com</segment>
+    </segments>
+  </file>
+  <file poster="poster@example.com"
+       date="1727280001"
+       subject="n8Vx3KaP yEnc (1/1)">
+    <groups>
+      <group>alt.binaries.example</group>
+    </groups>
+    <segments>
+      <segment bytes="500000" number="1">article-3@example.com</segment>
+    </segments>
+  </file>
+</nzb>
 ```
 
-**Download Client Behavior**: Download clients MUST use the password from the NZB meta tag (if available) for automatic decryption of encrypted yEnc blocks.
+### NZB 1.1 Example (Unencrypted Release with Archive Password)
 
-**Combined Encryption**: When using both encryption standards together (Scenario 3), the **same password MUST be used** for both control lines and body encryption. This approach is:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">archive_extraction_password</meta>
+  </head>
+  <file poster="poster@example.com"
+       date="1727280000"
+       subject="archive.part01.rar yEnc (1/2)">
+    <groups>
+      <group>alt.binaries.example</group>
+    </groups>
+    <segments>
+      <segment bytes="750000" number="1">article-rar-1@example.com</segment>
+      <segment bytes="750000" number="2">article-rar-2@example.com</segment>
+    </segments>
+  </file>
+</nzb>
+```
 
-- **Cryptographically secure**: Different domain separation strings ensure independent key derivation
-- **User-friendly**: Single password management instead of tracking multiple passwords
-- **Implementation-friendly**: Simplified NZB handling and software configuration
+### Segment Identity Rules
 
-**External Preprocessing**: If external encryption was used in preprocessing (e.g., password-protected RAR files), the **same password MUST be used** for yEnc block encryption to avoid multiple passwords in the NZB file and maintain single-password simplicity for end users.
+- `segmentIndex` is an explicit unsigned 32-bit integer in range `1..=4294967295` encoded in article bootstrap bytes, not in the NZB; see the two standards for the framing rule and the exact encoding.
 
-This unified password approach provides maximum security with optimal usability and implementation simplicity.
+## Processing and Failure Rules
 
-## Body Encryption vs. Preprocessing Methods
+The two .txt standards are the normative source for all rules; the lists below are only a summary with pointers.
 
-The **Body Encryption Standard** is designed to replace traditional preprocessing encryption methods such as password-protected RAR archives. On-the-fly body encryption offers significant advantages over preprocessing approaches:
+- NZB gating: `<meta type="yenc_encrypted">true</meta>` (trimmed, ASCII case-insensitive) enables transport decryption; any other value means ordinary yEnc, and a password without it stays an archive password (Body Standard Section 8).
+- `=ybegin` keywords: yEnc keywords on the restored `=ybegin` line are the space-separated tokens before `name=`; the `name=` value is the remainder of the line after `name=`, so text inside the name (such as `part=`) is never a keyword and is part of the AAD subject (Body Standard Section 2.1, Control Lines Standard Section 3).
+- Optional `yenc_version` and `yenc_cipher` metadata: an absent entry is allowed; a present but empty or non-matching value (`1.2` exactly; `XChaCha20-Poly1305` case-insensitive, both after trimming whitespace) is a `METADATA_VALIDATION` failure (Body Standard Section 8).
+- Header placement: an article is multipart if and only if physical line 2 after `=ybegin` is `=ypart`; receivers decrypt physical line 2 first and never read `part=` from `=ybegin` to decide placement (Body Standard Sections 3-5).
+- For a file that fits in one segment, the uploader chooses single-part framing or a one-part multipart block; both are conformant (Body Standard Section 4).
+- Key derivation: Argon2id with the exact fixed inputs of Body Standard Section 4; passwords are used unaltered and must be XML-representable when carried by NZB metadata.
+- Error tiers: `METADATA_VALIDATION` (NZB metadata or local configuration, before fetch, aborts the job) and `PROVIDER_FAILOVER` (fetched article bytes, retry another provider); both tiers release zero plaintext and zero ciphertext (Body Standard Section 5).
+- The wire CRC covers ciphertext and is verified before AEAD authentication; afterwards decoders clear or recompute it over plaintext (Body Standard Section 5).
+- Transport: producers dot-stuff per RFC 3977 Section 3.1.1; consumers dot-unstuff before line splitting; CRLF is canonical and bare LF is accepted; restoration preserves the terminators it receives and transport MAY have normalized bare LF to CRLF earlier, while line contents, physical line count, bootstrap, CRC, AAD, and authenticated plaintext remain unchanged (Body Standard Section 9); memory stays bounded to one article.
 
-### Efficiency Benefits
+## Wire Specifications and Invariants
 
-**Storage Requirements**:
+### Control Lines Encryption Specification
 
-- **No temporary files**: Encryption happens during upload, eliminating need for encrypted intermediate files
-- **50% storage reduction**: Avoids storing both original and encrypted versions simultaneously
-- **Streaming processing**: Files can be encrypted and uploaded directly from source without disk buffering
-
-**Performance Advantages**:
-
-- **Streamlined processing**: Single-pass encryption without intermediate archive creation
-- **Efficient algorithm**: ChaCha20 is optimized for software implementation and runs efficiently on modern CPUs
-- **Reduced I/O operations**: Eliminates read/write cycles for temporary encrypted files
-- **Memory efficiency**: Streaming encryption uses constant memory regardless of file size
-
-**Operational Benefits**:
-
-- **Simplified workflow**: Single-step encryption+upload instead of encrypt-then-upload process
-- **Reduced complexity**: No need to manage temporary encrypted archives or cleanup processes
-- **Better error handling**: Immediate feedback on encryption/upload failures without orphaned temp files
-- **Atomic operations**: Upload and encryption success/failure are coupled together
-
-### Traditional Preprocessing Limitations
-
-**RAR/ZIP Password Protection**:
-
-- Requires full file compression before upload
-- Creates temporary encrypted archives consuming additional disk space
-- Slower compression algorithms with higher CPU overhead
-- Two-stage process prone to interruption and cleanup issues
-- Limited to compression tool's encryption capabilities
-
-**On-the-fly Body Encryption**:
-
-- Direct encryption during yEnc encoding process
-- No intermediate file creation or storage overhead
-- Modern authenticated encryption with stronger security guarantees
-- Integrated error handling and recovery mechanisms
-- Cryptographically superior to legacy archive encryption methods
-
-## Specifications
-
-### Control Lines Encryption Standard
-
-**File**: [`yEnc Control Lines Encryption Standard.txt`](./yEnc%20Control%20Lines%20Encryption%20Standard.txt)
-
-**Algorithm**: FF1 Format-Preserving Encryption
+File: [`yEnc Control Lines Encryption Standard.txt`](./yEnc%20Control%20Lines%20Encryption%20Standard.txt)  
+Algorithm: FF1 Format-Preserving Encryption
 
 ```
 Target: yEnc control lines (lines beginning with "=y")
-Alphabet: 253 bytes (0x01-0xFF excluding CR/LF)
+Alphabet: 253 bytes (0x01-0xFF excluding CR/LF: 0x0D and 0x0A)
 Cipher: FF1 with AES-256
-Key Derivation: Argon2id(password, salt)
-Tweak: HMAC-SHA256(master, "yenc-control tweak" || segmentIndex || lineIndex)
-Salt: SHA-256("yenc-control salt" || password)[0:16] (deterministic)
+Key Derivation: Argon2id(password UTF-8 no-normalization, salt, time=1, memory=65536 KiB, parallelism=4, 32-byte output, version 0x13)
+Tweak: HMAC-SHA256(masterKey, "yenc-control tweak" || uint32_be(segmentIndex) || uint32_be(lineIndex))[0:8]
+Length: Line 1 expands by 20 bytes; lines 2..N preserve exact byte length
+Restoration: deterministic, position-based; data lines are never decrypted
 ```
 
-### Body Encryption Standard
+### Body Encryption Specification
 
-**File**: [`yEnc Body Encryption Standard.txt`](./yEnc%20Body%20Encryption%20Standard.txt)
-
-**Algorithm**: XChaCha20-Poly1305 Authenticated Encryption
+File: [`yEnc Body Encryption Standard.txt`](./yEnc%20Body%20Encryption%20Standard.txt)  
+Algorithm: XChaCha20-Poly1305 Authenticated Encryption
 
 ```
 Target: Binary file data (before yEnc encoding)
 Cipher: XChaCha20 (256-bit key, 192-bit nonce)
 Authentication: Poly1305 (128-bit tag)
-Key Derivation: Argon2id(password, salt, 256-bit output)
-Nonce: HMAC-SHA256(key, "yenc-body nonce" || segmentIndex)[0:24]
-Salt: SHA-256("yenc-body salt" || password)[0:16] (deterministic)
+Key Derivation: Argon2id(password UTF-8 no-normalization, salt, time=1, memory=65536 KiB, parallelism=4, 32-byte output, version 0x13)
+Nonce: HMAC-SHA256(key, "yenc-body nonce" || uint32_be(segmentIndex))[0:24]
+AAD: "yenc-body aad" || uint32_be(partNumber) || uint32_be(partBegin) || uint64_be(segmentBytes) || uint32_be(nameLength) || name (Body Standard Section 2.1)
+Format: =yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> index=<8_hex_chars> tag=<32_hex_chars>
+Placement: Single-part line 2 (after =ybegin); multipart line 3 (after =ypart)
+CRC Handling: Wire CRC in =yend covers ciphertext; verified then cleared (crc32 = None) or recomputed over authenticated plaintext
 ```
 
-## Security Properties
-
-### Control Lines Encryption
-
-- **Confidentiality**: AES-256 equivalent security for metadata
-- **Format-preserving**: No information leakage through format changes
-- **Deterministic**: Consistent output for identical inputs
-- **Obfuscation**: Complete hiding of yEnc structure and metadata
-- **Note**: Provides confidentiality only, not integrity verification
-
-### Body Encryption
-
-- **Confidentiality**: XChaCha20 encryption of file content
-- **Authenticity**: Poly1305 authentication prevents tampering
-- **Integrity**: Cryptographic verification of data integrity
-- **Non-malleability**: Authentication tag prevents modification attacks
-- **Note**: Provides both confidentiality and integrity protection
-
-### Combined Usage
-
-- **Total protection**: Both content and metadata encrypted
-- **Defense in depth**: Multiple encryption layers with different algorithms
-- **Flexible deployment**: Can be applied independently or together
-
-## Implementation Considerations
-
-### Control Lines Encryption
-
-- Requires FF1-compatible library supporting custom alphabets
-- First line of article body must be inspected prior to yEnc parsing in order to detect and decrypt encrypted control lines
-- No backward compatibility: existing download tools and yEnc parsers will not recognize encrypted control lines
-
-### Body Encryption
-
-- Requires XChaCha20-Poly1305 implementation (widely available)
-- Authentication tag stored in `=yencryption` control line
-- Standard yEnc tools can process encrypted blocks normally
-- Failed authentication must abort decryption completely
-
-### Both Standards
-
-- Segment indexing must be globally unique across entire upload session
-- NZB files must include file numbering for proper segmentIndex calculation
-- Password can be stored in NZB meta tags for automatic decryption
+A client MUST NOT release or write unauthenticated plaintext or ciphertext to any downstream target (assembly, downstream caches, files, or observable sinks). Internal restored metadata, intermediate ciphertext, and article-sized working buffers MAY pass between internal helpers inside the validation pipeline, but unauthenticated payload MUST NOT reach downstream stages before validation completes. Working memory MUST remain O(article_size) and MUST NOT grow with a multipart file or release (Body Standard Sections 5 and 9).
 
 ## Status
 
-Both specifications are currently in **experimental** status. The standards are being developed collaboratively and may undergo changes based on community feedback and security review.
+Both specifications are experimental v1.2 wire contracts; v1.2 is pre-release and not published. Version 1.2 defines combined mode only (control line encryption and body encryption together); other framing modes are reserved for future standards. The two .txt files in this repository are the only normative source.
+
+## Tooling and Conformance Suite
+
+### Scripts (`scripts/`)
+
+The repository provides automated validation and reference implementations under `scripts/`:
+
+- `yenc_enc_reference.py`: Reference helper for cryptographic derivations (Argon2id KDF, HMAC-SHA256 nonces and tweaks, NIST SP 800-38G FF1 with Radix 253 Alphabet, and XChaCha20-Poly1305 AEAD); the two .txt standards remain the only normative source.
+- `generate_conformance_vectors.py`: Deterministic test vector generator producing JSON fixtures with cryptographic inputs, wire lines, and expected outcomes.
+- `test_conformance_vectors.py`: Automated test harness exercising all generated test vector fixtures and validating failure-mode enforcement.
+- `test_standards_v1.py`: Behavioural specification checks recomputing the Section 10 examples and cross-document constants, including admitted exact-substring checks on version, KDF parameter spellings, and the wire form.
+
+Run tests using pytest or direct invocation:
+```bash
+pip install -r scripts/requirements.txt
+pytest scripts/
+```
+
+### Test Vectors (`test-vectors/`)
+
+Test vectors (helper artifacts for implementers; the two .txt standards are the only normative source) are maintained under `test-vectors/`:
+
+- `argon2id.json`: Key derivation test vectors including exact byte handling with no Unicode normalization.
+- `nonce_tweak.json`: HMAC-SHA256 body nonce (19-byte message, first 24 bytes of output) and control tweak (26-byte message, first 8 bytes of output) derivation vectors.
+- `body_encryption.json`: XChaCha20-Poly1305 AEAD round-trips with Section 2.1 Associated Data.
+- `control_line_encryption.json`: NIST SP 800-38G FF1 control-line encryption round-trips and deterministic multi-line article layout fixtures.
+- `malformed_inputs.json`: Malformed headers, bad salts, corrupted tags, framing mismatches, and zero-output assertions.
+- `index_allocation.json`: Uploader segmentIndex sequence progression skipping indices containing forbidden delimiter bytes (0x0A, 0x0D).
+
+To regenerate vectors deterministically:
+```bash
+python3 scripts/generate_conformance_vectors.py test-vectors
+```
 
 ## Contributing
 
-We welcome contributions to improve and refine the yEnc encryption standards:
-
-### Discussions
-
-For general questions, implementation discussions, or conceptual feedback, please use the [**Discussions**](../../discussions) section.
-
-### Issues and Change Requests
-
-- **Bug reports**: Found an error in the specification? Please [open an issue](../../issues/new).
-- **Enhancement proposals**: Suggestions for improvements should be submitted as [issues](../../issues/new) with detailed rationale.
-- **Specification changes**: Proposed modifications to the standard should be submitted as [pull requests](../../pulls) with clear justification and impact analysis.
-
-### Pull Requests
-
-When submitting PRs for specification changes:
-
-1. Clearly describe the motivation and impact
-2. Update relevant sections consistently across both standards
-3. Consider backward compatibility implications
-4. Include example scenarios if applicable
-5. Specify which standard(s) are affected by the changes
+For questions, implementation discussion, or conceptual feedback, use [Discussions](../../discussions). To report an error or propose an improvement, [open an issue](../../issues/new) with the motivation and rationale. Specification changes go through [pull requests](../../pulls) that describe the motivation and impact, keep both standards consistent, note backward compatibility implications, and state which standard(s) are affected.
 
 ## Related Work
 
-- [NIST SP 800-38G](https://csrc.nist.gov/publications/detail/sp/800-38g/final): FF1 and FF3 Format-Preserving Encryption specification
+- [NIST SP 800-38G](https://csrc.nist.gov/publications/detail/sp-800-38g/final): FF1 and FF3 Format-Preserving Encryption specification
 - [RFC 8439](https://tools.ietf.org/html/rfc8439): ChaCha20 and Poly1305 for AEAD (XChaCha20-Poly1305 extension)
 - [yEnc specification](http://www.yenc.org/yenc-draft.1.3.txt): Original yEnc encoding format
-- [Argon2](https://tools.ietf.org/html/rfc9106): Password-based key derivation function
+- [Argon2](https://tools.ietf.org/html/rfc9106): Password-based key derivation function (RFC 9106)
 
 ## License
 
